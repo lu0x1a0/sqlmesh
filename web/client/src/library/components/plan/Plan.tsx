@@ -13,7 +13,12 @@ import {
   EnumPlanApplyType,
 } from '~/context/plan'
 import { Divider } from '~/library/components/divider/Divider'
-import { useApiPlanRun, useApiPlanApply, apiCancelPlanApply } from '~/api'
+import {
+  useApiPlanRun,
+  useApiPlanApply,
+  apiCancelPlanApply,
+  apiCancelPlanRun,
+} from '~/api'
 import {
   type ContextEnvironmentEnd,
   type ContextEnvironmentStart,
@@ -30,6 +35,9 @@ import { useApplyPayload, usePlanPayload } from './hooks'
 import { useChannelEvents } from '@api/channels'
 import SplitPane from '../splitPane/SplitPane'
 import { EnumErrorKey, useIDE } from '~/library/pages/ide/context'
+import Loading from '@components/loading/Loading'
+import Spinner from '@components/logo/Spinner'
+import { EnumVariant } from '~/types/enum'
 
 function Plan({
   environment,
@@ -49,7 +57,7 @@ function Plan({
   const client = useQueryClient()
 
   const dispatch = usePlanDispatch()
-  const { errors, removeError } = useIDE()
+  const { errors, removeError, addError } = useIDE()
 
   const {
     auto_apply,
@@ -70,7 +78,7 @@ function Plan({
 
   const [isPlanRan, seIsPlanRan] = useState(false)
 
-  const subscribe = useChannelEvents()
+  const channel = useChannelEvents()
 
   const planPayload = usePlanPayload({ environment, isInitialPlanRun })
   const applyPayload = useApplyPayload({ isInitialPlanRun })
@@ -83,7 +91,8 @@ function Plan({
   ])
 
   useEffect(() => {
-    const unsubscribeTests = subscribe('tests', testsReport)
+    const channelTests = channel('tests', updateTestsReport)
+    const channelPlanReport = channel('report', updatePlanReport)
 
     if (environment.isInitial && environment.isDefault) {
       run()
@@ -97,10 +106,14 @@ function Plan({
       },
     ])
 
+    channelTests?.subscribe()
+    channelPlanReport?.subscribe()
+
     return () => {
       debouncedPlanRun.cancel()
 
-      unsubscribeTests?.()
+      channelTests?.unsubscribe()
+      channelPlanReport?.unsubscribe()
     }
   }, [])
 
@@ -169,7 +182,7 @@ function Plan({
     setPlanState(EnumPlanState.Failed)
   }, [errors])
 
-  function testsReport(data: { ok: boolean } & any): void {
+  function updateTestsReport(data: any & { ok: boolean }): void {
     dispatch([
       isTrue(data.ok)
         ? {
@@ -180,6 +193,20 @@ function Plan({
             type: EnumPlanActions.TestsReportErrors,
             testsReportErrors: data,
           },
+    ])
+  }
+
+  function updatePlanReport(data: {
+    ok: boolean
+    status: string
+    timestamp: number
+    type: string
+  }): void {
+    dispatch([
+      {
+        type: EnumPlanActions.PlanReport,
+        planReport: data,
+      },
     ])
   }
 
@@ -200,6 +227,10 @@ function Plan({
       },
       {
         type: EnumPlanActions.ResetPlanOptions,
+      },
+      {
+        type: EnumPlanActions.PlanReport,
+        planReport: undefined,
       },
     ])
   }
@@ -230,7 +261,19 @@ function Plan({
     setPlanState(EnumPlanState.Cancelling)
     setPlanAction(EnumPlanAction.Cancelling)
 
-    apiCancelPlanApply(client)
+    let apiCancel
+
+    if (planAction === EnumPlanAction.Applying) {
+      apiCancel = apiCancelPlanApply(client)
+
+      channel('tasks')?.unsubscribe()
+
+      setActivePlan(undefined)
+    } else {
+      apiCancel = apiCancelPlanRun(client)
+    }
+
+    apiCancel
       .then(() => {
         setPlanAction(EnumPlanAction.Run)
         setPlanState(EnumPlanState.Cancelled)
@@ -262,20 +305,19 @@ function Plan({
         if (data?.type === EnumPlanApplyType.Virtual) {
           setPlanState(EnumPlanState.Finished)
         }
+
+        elTaskProgress?.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        })
       })
       .catch(error => {
         if (isCancelledError(error)) {
           console.log('planApply', 'Request aborted by React Query')
         } else {
-          console.log('planApply', error)
+          addError(EnumErrorKey.ApplyPlan, error)
           reset()
         }
-      })
-      .finally(() => {
-        elTaskProgress?.current?.scrollIntoView({
-          behavior: 'smooth',
-          block: 'start',
-        })
       })
   }
 
@@ -338,15 +380,13 @@ function Plan({
           snapOffset={0}
           className="flex flex-col w-full h-full overflow-hidden"
         >
-          <Plan.Header />
-          <Plan.Wizard setRefTasksOverview={elTaskProgress} />
+          <PlanBlock elTaskProgress={elTaskProgress} />
         </SplitPane>
       ) : (
-        <>
-          <Plan.Header />
-          <Divider />
-          <Plan.Wizard setRefTasksOverview={elTaskProgress} />
-        </>
+        <PlanBlock
+          elTaskProgress={elTaskProgress}
+          hasDivider={true}
+        />
       )}
       <Divider />
       <Plan.Actions
@@ -369,3 +409,43 @@ Plan.StepOptions = PlanWizardStepOptions
 Plan.BackfillDates = PlanBackfillDates
 
 export default Plan
+
+function PlanBlock({
+  hasDivider = false,
+  elTaskProgress,
+}: {
+  hasDivider?: boolean
+  elTaskProgress: React.RefObject<HTMLDivElement>
+}): JSX.Element {
+  const planAction = useStorePlan(s => s.action)
+
+  return (
+    <>
+      <Plan.Header />
+      {hasDivider && <Divider />}
+      {planAction === EnumPlanAction.Cancelling ? (
+        <CancellingPlanOrApply />
+      ) : (
+        <Plan.Wizard setRefTasksOverview={elTaskProgress} />
+      )}
+    </>
+  )
+}
+
+function CancellingPlanOrApply(): JSX.Element {
+  return (
+    <div className="w-full h-full p-4">
+      <div className="w-full h-full flex justify-center items-center p-4 bg-warning-10 rounded-lg overflow-hidden">
+        <Loading className="inline-block">
+          <Spinner
+            variant={EnumVariant.Warning}
+            className="w-3 h-3 border border-neutral-10 mr-4"
+          />
+          <h3 className="text-2xl text-warning-500 font-bold">
+            Canceling Plan...
+          </h3>
+        </Loading>
+      </div>
+    </div>
+  )
+}

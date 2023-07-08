@@ -14,6 +14,8 @@ from web.server.sse import Event
 
 
 class ApiConsole(TerminalConsole):
+    task: t.Optional[asyncio.Task] = None
+
     def __init__(self) -> None:
         super().__init__()
         self.current_task_status: t.Dict[str, t.Dict[str, t.Any]] = {}
@@ -49,6 +51,9 @@ class ApiConsole(TerminalConsole):
 
     def update_snapshot_progress(self, snapshot_name: str, num_batches: int) -> None:
         """Update snapshot progress."""
+        if self.task and self.task.cancelled():
+            self.current_task_status = {}
+
         if self.current_task_status:
             self.current_task_status[snapshot_name]["completed"] += num_batches
             if (
@@ -63,6 +68,10 @@ class ApiConsole(TerminalConsole):
     def stop_snapshot_progress(self, success: bool = True) -> None:
         """Stop the load progress"""
         self.current_task_status = {}
+
+        if self.task and self.task.cancelled():
+            return
+
         if success:
             self.queue.put_nowait(
                 self._make_event("All model batches have been executed successfully")
@@ -99,20 +108,35 @@ class ApiConsole(TerminalConsole):
         self.queue.put_nowait(self._make_event(data, event="tests", ok=ok))
 
     def log_success(self, msg: str) -> None:
+        if self.task and self.task.cancelled():
+            return
+
         self.queue.put_nowait(self._make_event(msg))
+
+    def log(
+        self, event: str | None = None, data: str | dict[str, t.Any] | None = None, ok: bool = True
+    ) -> None:
+        self.queue.put_nowait(self._make_event(data=data or {}, event=event, ok=ok))
 
     def stop_promotion_progress(self, success: bool = True) -> None:
         self.promotion_task = None
-        if self.promotion_progress is not None:
-            self.promotion_progress.stop()
-            self.promotion_progress = None
-            if success:
-                self.queue.put_nowait(
-                    self._make_event(
-                        "The target environment has been updated successfully",
-                        event="promote-environment",
-                    )
+
+        if self.promotion_progress is None:
+            return
+
+        self.promotion_progress.stop()
+        self.promotion_progress = None
+
+        if self.task and self.task.cancelled():
+            return
+
+        if success:
+            self.queue.put_nowait(
+                self._make_event(
+                    "The target environment has been updated successfully",
+                    event="promote-environment",
                 )
+            )
 
     def log_exception(self) -> None:
         """Log an exception."""

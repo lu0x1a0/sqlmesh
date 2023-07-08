@@ -1,49 +1,78 @@
 import { isNil } from '../utils'
 
 type ChannelCallback<TData = any> = (data: TData) => void
-
-const SSE_CHANNEL = getEventSource('/api/events')
-
-const CHANNELS = new Map<string, Optional<() => void>>()
-
-export function useChannelEvents(): <TData = any>(
+type ChannelCreate = <TData = any>(
   topic: string,
-  callback: ChannelCallback<TData>,
-) => Optional<() => void> {
-  return (topic, callback) => subscribe(topic, callback)
+  callback?: ChannelCallback<TData>,
+) => Optional<ChannelActions>
+type ChannelEvent = <TData = any>(
+  topic: string,
+  callback?: ChannelCallback<TData>,
+) => (e: MessageEvent) => void
+
+interface ChannelActions {
+  subscribe: () => void
+  unsubscribe: () => void
+  remove: () => void
+  refresh: () => void
 }
 
-function subscribe<TData = any>(
-  topic: string,
-  callback: ChannelCallback<TData>,
-): Optional<() => void> {
-  if (isNil(topic) || CHANNELS.has(topic)) return CHANNELS.get(topic)
+const SSE_CHANNEL = getEventSource('/api/events')
+const CHANNELS = new Map<string, ChannelActions>()
 
-  const handler = handleChannelTopicCallback<TData>(topic, callback)
+const handleChannelTopicCallback: ChannelEvent =
+  function handleChannelTopicCallback(topic, callback) {
+    return (event: MessageEvent<string>) => {
+      if (isNil(topic) || isNil(callback) || isNil(event.data)) return
 
-  SSE_CHANNEL.addEventListener(topic, handler)
+      try {
+        callback?.(JSON.parse(event.data))
+      } catch (error) {
+        console.warn(error)
+      }
+    }
+  }
 
-  CHANNELS.set(topic, () => {
+const createChannel: ChannelCreate = function createChannel(topic, callback) {
+  const handler = handleChannelTopicCallback(topic, callback)
+
+  if (isNil(topic) || isNil(handler) || CHANNELS.has(topic))
+    return CHANNELS.get(topic)
+
+  function subscribe(): void {
+    SSE_CHANNEL.addEventListener(topic, handler)
+  }
+
+  function unsubscribe(): void {
     SSE_CHANNEL.removeEventListener(topic, handler)
+  }
+
+  function remove(): void {
+    unsubscribe()
+
     CHANNELS.delete(topic)
+  }
+
+  function refresh(): void {
+    unsubscribe()
+
+    setTimeout(() => {
+      subscribe()
+    }, 500)
+  }
+
+  CHANNELS.set(topic, {
+    refresh,
+    remove,
+    subscribe,
+    unsubscribe,
   })
 
   return CHANNELS.get(topic)
 }
 
-function handleChannelTopicCallback<TData = any>(
-  topic: string,
-  callback: ChannelCallback<TData>,
-): (e: MessageEvent) => void {
-  return (event: MessageEvent<string>) => {
-    if (isNil(topic) || isNil(callback) || isNil(event.data)) return
-
-    try {
-      callback(JSON.parse(event.data))
-    } catch (error) {
-      console.warn(error)
-    }
-  }
+export function useChannelEvents(): ChannelCreate {
+  return (topic, callback) => createChannel(topic, callback)
 }
 
 function getEventSource(source: string): EventSource {

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import functools
 import typing as t
 
 from fastapi import APIRouter, Body, Depends, Request, Response, status
 
 from sqlmesh.core.context import Context
 from sqlmesh.utils.date import make_inclusive, to_ds
+from sqlmesh.utils.errors import PlanError
 from web.server import models
 from web.server.exceptions import ApiException
-from web.server.settings import get_loaded_context
+from web.server.settings import get_context, get_loaded_context
+from web.server.utils import run_in_executor
 
 router = APIRouter()
 
@@ -33,23 +37,26 @@ async def run_plan(
             origin="API -> plan -> run_plan",
         )
 
+    plan_func = functools.partial(
+        context.plan,
+        no_prompts=True,
+        skip_tests=True,
+        environment=environment,
+        start=plan_dates.start if plan_dates else None,
+        end=plan_dates.end if plan_dates else None,
+        create_from=plan_options.create_from,
+        restate_models=plan_options.restate_models,
+        no_gaps=plan_options.no_gaps,
+        skip_backfill=plan_options.skip_backfill,
+        forward_only=plan_options.forward_only,
+        no_auto_categorization=plan_options.no_auto_categorization,
+    )
+    request.app.state.task = asyncio.create_task(run_in_executor(plan_func))
     try:
-        plan = context.plan(
-            environment=environment,
-            no_prompts=True,
-            start=plan_dates.start if plan_dates else None,
-            end=plan_dates.end if plan_dates else None,
-            create_from=plan_options.create_from,
-            skip_tests=plan_options.skip_tests,
-            restate_models=plan_options.restate_models,
-            no_gaps=plan_options.no_gaps,
-            skip_backfill=plan_options.skip_backfill,
-            forward_only=plan_options.forward_only,
-            no_auto_categorization=plan_options.no_auto_categorization,
-        )
-    except Exception:
+        plan = await request.app.state.task
+    except PlanError as e:
         raise ApiException(
-            message="Unable to run a plan",
+            message=str(e),
             origin="API -> plan -> run_plan",
         )
 
@@ -93,11 +100,15 @@ async def run_plan(
 async def cancel_plan(
     request: Request,
     response: Response,
+    context: Context = Depends(get_context),
 ) -> None:
     """Cancel a plan application"""
-    if not hasattr(request.app.state, "task") or not request.app.state.task.cancel():
+    if not hasattr(request.app.state, "task") and not request.app.state.task.done():
         raise ApiException(
-            message="Plan/apply is already running",
+            message="No running plan to cancel",
             origin="API -> plan -> cancel_plan",
         )
+    else:
+        request.app.state.task.cancel()
+
     response.status_code = status.HTTP_204_NO_CONTENT

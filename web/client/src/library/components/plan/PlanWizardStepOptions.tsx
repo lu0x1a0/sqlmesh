@@ -36,7 +36,7 @@ export default function PlanWizardStepOptions({
   )
 
   return (
-    <li className={clsx('mt-6 mb-6', className)}>
+    <div className={clsx('mt-6 mb-6', className)}>
       <form className="w-full h-full">
         <fieldset className={clsx('mb-10 mt-6')}>
           <h2 className="whitespace-nowrap text-xl font-bold mb-1 px-4">
@@ -222,6 +222,6 @@ export default function PlanWizardStepOptions({
           </Disclosure>
         </fieldset>
       </form>
-    </li>
+    </div>
   )
 }
